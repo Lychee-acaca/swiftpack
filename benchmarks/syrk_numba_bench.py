@@ -19,9 +19,9 @@ K = 256
 # ---------------------------------------------------------
 def syrk_python_0(A, C):
     n, k = A.shape
+    C.fill(0.0)
     for i in range(n):
         for j in range(i, n):
-            C[i, j] = 0.0
             for l in range(k):
                 C[i, j] += A[i, l] * A[j, l]
             C[j, i] = C[i, j]
@@ -32,9 +32,9 @@ def syrk_python_0(A, C):
 @njit
 def syrk_numba_1(A, C):
     n, k = A.shape
+    C.fill(0.0)
     for i in range(n):
         for j in range(i, n):
-            C[i, j] = 0.0
             for l in range(k):
                 C[i, j] += A[i, l] * A[j, l]
             C[j, i] = C[i, j]
@@ -120,10 +120,43 @@ def syrk_2_lji(A, C):
 @njit(fastmath=True)
 def syrk_opt_flags_3(A, C):
     n, k = A.shape
+    C.fill(0.0)
     for i in range(n):
         for j in range(i, n):
-            C[i, j] = 0.0
             for l in range(k):
+                C[i, j] += A[i, l] * A[j, l]
+            C[j, i] = C[i, j]
+
+# ---------------------------------------------------------
+# Baseline 4: Parallel Loop Versions
+# ---------------------------------------------------------
+@njit(parallel=True, fastmath=True)
+def syrk_parallel_i_4(A, C):
+    n, k = A.shape
+    C.fill(0.0)
+    for i in prange(n):
+        for j in range(i, n):
+            for l in range(k):
+                C[i, j] += A[i, l] * A[j, l]
+            C[j, i] = C[i, j]
+
+@njit(parallel=True, fastmath=True)
+def syrk_parallel_j_4(A, C):
+    n, k = A.shape
+    C.fill(0.0)
+    for i in range(n):
+        for j in prange(i, n):
+            for l in range(k):
+                C[i, j] += A[i, l] * A[j, l]
+            C[j, i] = C[i, j]
+
+@njit(parallel=True, fastmath=True)
+def syrk_parallel_l_4(A, C):
+    n, k = A.shape
+    C.fill(0.0)
+    for i in range(n):
+        for j in range(i, n):
+            for l in prange(k):
                 C[i, j] += A[i, l] * A[j, l]
             C[j, i] = C[i, j]
 
@@ -193,6 +226,9 @@ def run_benchmark(matrix_size=(512, 256)):
         ("2_order_lij", syrk_2_lij),
         ("2_order_lji", syrk_2_lji),
         ("3_fastmath_ijl", syrk_opt_flags_3),
+        ("4_parallel_i", syrk_parallel_i_4),
+        ("4_parallel_j", syrk_parallel_j_4),
+        ("4_parallel_l", syrk_parallel_l_4),
 
         ("10_np_dot", syrk_np_dot),
     ]
