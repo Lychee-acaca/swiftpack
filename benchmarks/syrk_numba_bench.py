@@ -115,6 +115,19 @@ def syrk_2_lji(A, C):
             C[j, i] = C[i, j]
 
 # ---------------------------------------------------------
+# Baseline 3: Optimization Flags for Backend
+# ---------------------------------------------------------
+@njit(fastmath=True)
+def syrk_opt_flags_3(A, C):
+    n, k = A.shape
+    for i in range(n):
+        for j in range(i, n):
+            C[i, j] = 0.0
+            for l in range(k):
+                C[i, j] += A[i, l] * A[j, l]
+            C[j, i] = C[i, j]
+
+# ---------------------------------------------------------
 # Baseline 10: Reference NumPy dot
 # ---------------------------------------------------------
 def syrk_np_dot(A, C):
@@ -179,6 +192,7 @@ def run_benchmark(matrix_size=(512, 256)):
         ("2_order_jli", syrk_2_jli),
         ("2_order_lij", syrk_2_lij),
         ("2_order_lji", syrk_2_lji),
+        ("3_fastmath_ijl", syrk_opt_flags_3),
 
         ("10_np_dot", syrk_np_dot),
     ]
