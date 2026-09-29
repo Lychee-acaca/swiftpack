@@ -40,6 +40,81 @@ def syrk_numba_1(A, C):
             C[j, i] = C[i, j]
 
 # ---------------------------------------------------------
+# Baseline 2: Loop Order Permutations (6 explicit functions)
+# ---------------------------------------------------------
+@njit
+def syrk_2_ijl(A, C):
+    n, k = A.shape
+    C.fill(0.0)
+    for i in range(n):
+        for j in range(i, n):
+            for l in range(k):
+                C[i, j] += A[i, l] * A[j, l]
+    for i in range(n):
+        for j in range(i + 1, n):
+            C[j, i] = C[i, j]
+
+@njit
+def syrk_2_ilj(A, C):
+    n, k = A.shape
+    C.fill(0.0)
+    for i in range(n):
+        for l in range(k):
+            for j in range(i, n):
+                C[i, j] += A[i, l] * A[j, l]
+    for i in range(n):
+        for j in range(i + 1, n):
+            C[j, i] = C[i, j]
+
+@njit
+def syrk_2_jil(A, C):
+    n, k = A.shape
+    C.fill(0.0)
+    for j in range(n):
+        for i in range(j + 1):
+            for l in range(k):
+                C[i, j] += A[i, l] * A[j, l]
+    for i in range(n):
+        for j in range(i + 1, n):
+            C[j, i] = C[i, j]
+
+@njit
+def syrk_2_jli(A, C):
+    n, k = A.shape
+    C.fill(0.0)
+    for j in range(n):
+        for l in range(k):
+            for i in range(j + 1):
+                C[i, j] += A[i, l] * A[j, l]
+    for i in range(n):
+        for j in range(i + 1, n):
+            C[j, i] = C[i, j]
+
+@njit
+def syrk_2_lij(A, C):
+    n, k = A.shape
+    C.fill(0.0)
+    for l in range(k):
+        for i in range(n):
+            for j in range(i, n):
+                C[i, j] += A[i, l] * A[j, l]
+    for i in range(n):
+        for j in range(i + 1, n):
+            C[j, i] = C[i, j]
+
+@njit
+def syrk_2_lji(A, C):
+    n, k = A.shape
+    C.fill(0.0)
+    for l in range(k):
+        for j in range(n):
+            for i in range(j + 1):
+                C[i, j] += A[i, l] * A[j, l]
+    for i in range(n):
+        for j in range(i + 1, n):
+            C[j, i] = C[i, j]
+
+# ---------------------------------------------------------
 # Baseline 10: Reference NumPy dot
 # ---------------------------------------------------------
 def syrk_np_dot(A, C):
@@ -98,6 +173,13 @@ def run_benchmark(matrix_size=(512, 256)):
     # Baseline functions list
     functions = [
         ("1_numba_naive", syrk_numba_1),
+        ("2_order_ijl", syrk_2_ijl),
+        ("2_order_ilj", syrk_2_ilj),
+        ("2_order_jil", syrk_2_jil),
+        ("2_order_jli", syrk_2_jli),
+        ("2_order_lij", syrk_2_lij),
+        ("2_order_lji", syrk_2_lji),
+
         ("10_np_dot", syrk_np_dot),
     ]
 
