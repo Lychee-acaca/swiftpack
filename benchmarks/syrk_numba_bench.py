@@ -14,6 +14,8 @@ os.environ["OMP_NUM_THREADS"] = "1"
 N = 512
 K = 256
 BLOCK_SIZE = 32
+BLOCK_SIZE_L2 = 128
+BLOCK_SIZE_L1 = 32
 
 # ---------------------------------------------------------
 # Baseline 0: Pure Python Naive SYRK
@@ -259,6 +261,60 @@ def syrk_blocked_temp_copy_7(A, C):
 
 
 # ---------------------------------------------------------
+# Baseline 8: Two-Level Blocked Parallel I with Temp Copy & np.dot
+# ---------------------------------------------------------
+@njit(parallel=True, fastmath=True)
+def syrk_two_level_blocked_temp_np_dot_8(A, C):
+    n, k = A.shape
+    l2 = BLOCK_SIZE_L2
+    l1 = BLOCK_SIZE_L1
+    C.fill(0.0)
+
+    num_l2_i_blocks = (n + l2 - 1) // l2
+
+    for b2 in prange(num_l2_i_blocks):
+        i2_start = b2 * l2
+        i2_end = min(i2_start + l2, n)
+
+        for j2_start in range(i2_start, n, l2):
+            j2_end = min(j2_start + l2, n)
+
+            temp_l2 = C[i2_start:i2_end,j2_start:j2_end].copy()
+            for k2_start in range(0, k, l2):
+                k2_end = min(k2_start + l2, k)
+                for i1_start in range(i2_start, i2_end, l1):
+                    i1_end = min(i1_start + l1, i2_end)
+
+                    i1_rel_start = i1_start - i2_start
+                    i1_rel_end = i1_end - i2_start
+                    j1_start = max(i1_start, j2_start)
+
+                    for j1_start in range(j1_start, j2_end, l1):
+                        j1_end = min(j1_start + l1, j2_end)
+                        if j1_end <= i1_start:
+                            continue
+                        j1_rel_start = j1_start - j2_start
+                        j1_rel_end = j1_end - j2_start
+                        temp_l1 = temp_l2[
+                            i1_rel_start:i1_rel_end,
+                            j1_rel_start:j1_rel_end
+                        ].copy()
+
+                        for k1_start in range(k2_start, k2_end, l1):
+                            k1_end = min(k1_start + l1, k2_end)
+                            temp_l1 += np.dot(
+                                A[i1_start:i1_end,k1_start:k1_end],
+                                A[j1_start:j1_end,k1_start:k1_end].T
+                            )
+                        temp_l2[i1_rel_start:i1_rel_end,j1_rel_start:j1_rel_end] = temp_l1
+
+            C[i2_start:i2_end,j2_start:j2_end] = temp_l2
+
+            for i in range(i2_start, i2_end):
+                for j in range(max(i, j2_start), j2_end):
+                    C[j, i] = C[i, j]
+
+# ---------------------------------------------------------
 # Baseline 10: Reference NumPy dot
 # ---------------------------------------------------------
 def syrk_np_dot(A, C):
@@ -339,6 +395,7 @@ def run_benchmark(matrix_size=(512, 256)):
         ("5_blocked_parallel_i", syrk_blocked_parallel_5),
         ("6_blocked_np_dot", syrk_blocked_np_dot_6),
         ("7_blocked_temp_copy", syrk_blocked_temp_copy_7),
+        ("8_two_level_blocked_temp_np_dot", syrk_two_level_blocked_temp_np_dot_8),
         ("10_np_dot", syrk_np_dot),
     ]
 
