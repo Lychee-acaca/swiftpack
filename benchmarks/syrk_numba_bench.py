@@ -262,7 +262,16 @@ def syrk_blocked_temp_copy_7(A, C):
 # Baseline 10: Reference NumPy dot
 # ---------------------------------------------------------
 def syrk_np_dot(A, C):
+    # not fair
     np.copyto(C, np.dot(A, A.T))
+    # n, k = A.shape
+    # C.fill(0.0)
+    # for i in range(n):
+    #     for j in range(i, n):
+    #         C[i, j] = np.dot(A[i, :], A[j, :])
+    # for i in range(n):
+    #     for j in range(i + 1, n):
+    #         C[j, i] = C[i, j]
 
 # ---------------------------------------------------------
 # Execution & Benchmarking Routine
