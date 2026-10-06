@@ -225,6 +225,39 @@ def syrk_blocked_np_dot_6(A, C):
                 for j in range(max(i, j_block), j_end):
                     C[j, i] = C[i, j]
 
+
+# ---------------------------------------------------------
+# Baseline 7: Blocked Temp Copy-In / Copy-Out
+# ---------------------------------------------------------
+@njit(parallel=True, fastmath=True)
+def syrk_blocked_temp_copy_7(A, C):
+    n, k = A.shape
+    bs = BLOCK_SIZE
+    C.fill(0.0)
+
+    num_i_blocks = (n + bs - 1) // bs
+
+    for b in prange(num_i_blocks):
+        i_block = b * bs
+        i_end = min(i_block + bs, n)
+        for j_block in range(i_block, n, bs):
+            j_end = min(j_block + bs, n)
+
+            temp = C[i_block:i_end, j_block:j_end].copy()
+            for l_block in range(0, k, bs):
+                l_end = min(l_block + bs, k)
+
+                temp += np.dot(
+                    A[i_block:i_end, l_block:l_end],
+                    A[j_block:j_end, l_block:l_end].T
+                )
+            C[i_block:i_end, j_block:j_end] = temp
+
+            for i in range(i_block, i_end):
+                for j in range(max(i, j_block), j_end):
+                    C[j, i] = C[i, j]
+
+
 # ---------------------------------------------------------
 # Baseline 10: Reference NumPy dot
 # ---------------------------------------------------------
@@ -296,6 +329,7 @@ def run_benchmark(matrix_size=(512, 256)):
         ("4_parallel_l", syrk_parallel_l_4),
         ("5_blocked_parallel_i", syrk_blocked_parallel_5),
         ("6_blocked_np_dot", syrk_blocked_np_dot_6),
+        ("7_blocked_temp_copy", syrk_blocked_temp_copy_7),
         ("10_np_dot", syrk_np_dot),
     ]
 
