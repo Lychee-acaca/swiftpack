@@ -315,6 +315,41 @@ def syrk_two_level_blocked_temp_np_dot_8(A, C):
                     C[j, i] = C[i, j]
 
 # ---------------------------------------------------------
+# Baseline 9: Zero Allocation Blocked syrk
+# ---------------------------------------------------------
+@njit(parallel=True, fastmath=True)
+def syrk_blocked_zero_alloc_9(A, C):
+    n, k = A.shape
+    bs = BLOCK_SIZE
+
+    C.fill(0.0)
+
+    num_i_blocks = (n + bs - 1) // bs
+
+    for b in prange(num_i_blocks):
+        i_block = b * bs
+        i_end = min(i_block + bs, n)
+        h = i_end - i_block
+
+        temp_tile = np.empty((bs, bs), dtype=A.dtype)
+        for j_block in range(i_block, n, bs):
+            j_end = min(j_block + bs, n)
+            w = j_end - j_block
+
+            temp = temp_tile[:h, :w]
+            temp.fill(0.0)
+            for l_block in range(0, k, bs):
+                l_end = min(l_block + bs, k)
+                temp += np.dot(
+                    A[i_block:i_end, l_block:l_end],
+                    A[j_block:j_end, l_block:l_end].T
+                )
+            C[i_block:i_end, j_block:j_end] = temp
+        for i in range(i_block, i_end):
+            for j in range(max(i, i_block), n):
+                C[j, i] = C[i, j]
+
+# ---------------------------------------------------------
 # Baseline 10: Reference NumPy dot
 # ---------------------------------------------------------
 def syrk_np_dot(A, C):
@@ -396,6 +431,7 @@ def run_benchmark(matrix_size=(512, 256)):
         ("6_blocked_np_dot", syrk_blocked_np_dot_6),
         ("7_blocked_temp_copy", syrk_blocked_temp_copy_7),
         ("8_two_level_blocked_temp_np_dot", syrk_two_level_blocked_temp_np_dot_8),
+        ("9_blocked_zero_alloc", syrk_blocked_zero_alloc_9),
         ("10_np_dot", syrk_np_dot),
     ]
 
