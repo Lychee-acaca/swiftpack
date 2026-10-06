@@ -20,6 +20,7 @@ K = 256
 def syrk_python_0(A, C):
     n, k = A.shape
     C.fill(0.0)
+    # A * A', selecting row i and row j
     for i in range(n):
         for j in range(i, n):
             for l in range(k):
@@ -156,8 +157,11 @@ def syrk_parallel_l_4(A, C):
     C.fill(0.0)
     for i in range(n):
         for j in range(i, n):
+            # race condition here if using shared C[i, j]
+            s = 0.0
             for l in prange(k):
-                C[i, j] += A[i, l] * A[j, l]
+                s += A[i, l] * A[j, l]
+            C[i, j] = s
             C[j, i] = C[i, j]
 
 # ---------------------------------------------------------
