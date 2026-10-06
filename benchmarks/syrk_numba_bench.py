@@ -13,6 +13,7 @@ os.environ["OMP_NUM_THREADS"] = "1"
 # Default Matrix Dimensions
 N = 512
 K = 256
+BLOCK_SIZE = 32
 
 # ---------------------------------------------------------
 # Baseline 0: Pure Python Naive SYRK
@@ -165,6 +166,66 @@ def syrk_parallel_l_4(A, C):
             C[j, i] = C[i, j]
 
 # ---------------------------------------------------------
+# Baseline 5: Blocked (Tiled) Parallel I Code
+# ---------------------------------------------------------
+@njit(parallel=True, fastmath=True)
+def syrk_blocked_parallel_5(A, C):
+    n, k = A.shape
+    bs = BLOCK_SIZE
+    C.fill(0.0)
+
+    num_i_blocks = (n + bs - 1) // bs
+
+    for b in prange(num_i_blocks):
+        i_block = b * bs
+        i_end = min(i_block + bs, n)
+
+        for j_block in range(i_block, n, bs):
+            j_end = min(j_block + bs, n)
+            for l_block in range(0, k, bs):
+                l_end = min(l_block + bs, k)
+
+                for i in range(i_block, i_end):
+                    for j in range(max(i, j_block), j_end):
+                        for l in range(l_block, l_end):
+                            C[i, j] += A[i, l] * A[j, l]
+
+            for i in range(i_block, i_end):
+                for j in range(max(i, j_block), j_end):
+                    C[j, i] = C[i, j]
+
+# ---------------------------------------------------------
+# Baseline 6: Blocked Parallel I using np.dot for Sub-blocks
+# ---------------------------------------------------------
+@njit(parallel=True, fastmath=True)
+def syrk_blocked_np_dot_6(A, C):
+    n, k = A.shape
+    bs = BLOCK_SIZE
+    C.fill(0.0)
+
+    num_i_blocks = (n + bs - 1) // bs
+
+    for b in prange(num_i_blocks):
+        i_block = b * bs
+        i_end = min(i_block + bs, n)
+
+        for j_block in range(i_block, n, bs):
+            j_end = min(j_block + bs, n)
+
+            for l_block in range(0, k, bs):
+                l_end = min(l_block + bs, k)
+
+                C[i_block:i_end, j_block:j_end] += np.dot(
+                    A[i_block:i_end, l_block:l_end],
+                    A[j_block:j_end, l_block:l_end].T
+                )
+
+            # Copy upper triangle to lower triangle
+            for i in range(i_block, i_end):
+                for j in range(max(i, j_block), j_end):
+                    C[j, i] = C[i, j]
+
+# ---------------------------------------------------------
 # Baseline 10: Reference NumPy dot
 # ---------------------------------------------------------
 def syrk_np_dot(A, C):
@@ -233,7 +294,8 @@ def run_benchmark(matrix_size=(512, 256)):
         ("4_parallel_i", syrk_parallel_i_4),
         ("4_parallel_j", syrk_parallel_j_4),
         ("4_parallel_l", syrk_parallel_l_4),
-
+        ("5_blocked_parallel_i", syrk_blocked_parallel_5),
+        ("6_blocked_np_dot", syrk_blocked_np_dot_6),
         ("10_np_dot", syrk_np_dot),
     ]
 
