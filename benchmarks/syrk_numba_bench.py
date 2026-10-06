@@ -287,9 +287,8 @@ def syrk_two_level_blocked_temp_np_dot_8(A, C):
 
                     i1_rel_start = i1_start - i2_start
                     i1_rel_end = i1_end - i2_start
-                    j1_start = max(i1_start, j2_start)
-
-                    for j1_start in range(j1_start, j2_end, l1):
+                    j1_first = max(i1_start, j2_start)
+                    for j1_start in range(j1_first, j2_end, l1):
                         j1_end = min(j1_start + l1, j2_end)
                         if j1_end <= i1_start:
                             continue
