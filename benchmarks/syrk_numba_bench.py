@@ -16,7 +16,7 @@ from scipy.linalg.blas import dsyrk
 from numba import njit, prange, set_num_threads, get_num_threads
 
 BS = 64
-L2 = 128
+L2 = 64
 L1 = 64
 
 
@@ -426,8 +426,9 @@ def v12_fused_triangle_store(X, C, a, b, u):
                     C[i, j] = a * temp[i - is_, j - js] + b * C[i, j]
 
 
-# 13 V12 fused triangular output update + two-level L1/L2 blocking.
-# Keep V12 diagonal copy-in/out and direct off-diagonal output update.
+# ---------------------------------------------------------
+# Baseline 13: Two-Level Blocked Parallel based on v12
+# ---------------------------------------------------------
 @njit(parallel=True, fastmath=True)
 def v13_two_level(X, C, a, b, u):
     n, k = X.shape
@@ -475,10 +476,13 @@ def v13_two_level(X, C, a, b, u):
                     C[i, j] = a * t2[i - is2, j - js2] + b * C[i, j]
 
 
-# 14 V12 fused triangle update + a per-task scratch buffer off diagonal.
-# With flat tasks, this buffer is NOT reused across tiles (unlike the professor's original block-row implementation).
+# ---------------------------------------------------------
+# Baseline 14: Full-K GEMM per off-diagonal tile (based on V12)
+# Keep V12 diagonal temp copy-in/out and flat triangular tasks.
+# Remove redundant K blocking: one np.dot per off-diagonal tile.
+# ---------------------------------------------------------
 @njit(parallel=True, fastmath=True)
-def v14_reusable_buffer(X, C, a, b, u):
+def v14_full_k_dot(X, C, a, b, u):
     n, k = X.shape
     nb = (n + BS - 1) // BS
     nt = nb * (nb + 1) // 2
@@ -491,7 +495,7 @@ def v14_reusable_buffer(X, C, a, b, u):
         js = bj * BS
         je = min(n, js + BS)
         if bi == bj:
-            # Preserve V12 diagonal copy-in/out; only update the active triangle.
+            # Unchanged V12 diagonal path: only the active triangle.
             temp = C[is_:ie, js:je].copy()
             for i in range(is_, ie):
                 for j in range(i, je) if u else range(js, i + 1):
@@ -503,74 +507,18 @@ def v14_reusable_buffer(X, C, a, b, u):
                 for j in range(i, je) if u else range(js, i + 1):
                     C[i, j] = temp[i - is_, j - js]
         else:
-            # Scratch is still allocated per tile, not reused across tiles.
-            scratch = np.empty((BS, BS), dtype=np.float64)
-            t = scratch[:ie - is_, :je - js]
-            t.fill(0.0)
-            for lb in range(0, k, BS):
-                le = min(lb + BS, k)
-                t += np.dot(X[is_:ie, lb:le], X[js:je, lb:le].T)
+            # One full-K BLAS call instead of repeated smaller K-block calls.
+            temp = np.dot(X[is_:ie, :], X[js:je, :].T)
             for i in range(is_, ie):
                 for j in range(js, je):
-                    C[i, j] = a * t[i - is_, j - js] + b * C[i, j]
+                    C[i, j] = a * temp[i - is_, j - js] + b * C[i, j]
 
 
-# 15 Combined: V12 fused triangle update + flat tasks + diagonal 4-way unrolling.
-# Off-diagonal blocks still use np.dot and update C directly.
-@njit(fastmath=True)
-def combined_tile(X, C, a, b, u, bi, bj):
-    n, k = X.shape
-    lim = k - (k % 4)
-    is_ = bi * BS
-    ie = min(n, is_ + BS)
-    js = bj * BS
-    je = min(n, js + BS)
-    if bi == bj:
-        # Preserve V12 diagonal copy-in/out and add 4-way unrolling.
-        temp = C[is_:ie, js:je].copy()
-        for i in range(is_, ie):
-            for j in range(i, je) if u else range(js, i + 1):
-                s0 = s1 = s2 = s3 = 0.0
-                for l in range(0, lim, 4):
-                    s0 += X[i, l] * X[j, l]
-                    s1 += X[i, l + 1] * X[j, l + 1]
-                    s2 += X[i, l + 2] * X[j, l + 2]
-                    s3 += X[i, l + 3] * X[j, l + 3]
-                s = (s0 + s1) + (s2 + s3)
-                for l in range(lim, k):
-                    s += X[i, l] * X[j, l]
-                temp[i - is_, j - js] = a * s + b * temp[i - is_, j - js]
-        for i in range(is_, ie):
-            for j in range(i, je) if u else range(js, i + 1):
-                C[i, j] = temp[i - is_, j - js]
-    else:
-        tmp = np.zeros((ie - is_, je - js), dtype=np.float64)
-        for lb in range(0, k, BS):
-            le = min(lb + BS, k)
-            tmp += np.dot(X[is_:ie, lb:le], X[js:je, lb:le].T)
-        for i in range(is_, ie):
-            for j in range(js, je):
-                C[i, j] = a * tmp[i - is_, j - js] + b * C[i, j]
-
-
-@njit(parallel=True, fastmath=True)
-def v15_combined(X, C, a, b, u):
-    n, k = X.shape
-    nb = (n + BS - 1) // BS
-    nt = nb * (nb + 1) // 2
-    for task in prange(nt):
-        br, bc = triangular_task_coords(task, nb)
-        bi = int(br if u else bc)
-        bj = int(bc if u else br)
-        combined_tile(X, C, a, b, u, bi, bj)
-
-
-# 16 Reference BLAS: SciPy DSYRK updates only the selected triangle.
-def v16_blas_dsyrk(X, C, a, b, u):
-    result = dsyrk(alpha=a, a=np.asfortranarray(X), beta=b,
-                   c=np.array(C, order='F', copy=True),
-                   trans=0, lower=0 if u else 1, overwrite_c=1)
-    C[:, :] = result
+# 15 Reference BLAS: SciPy DSYRK updates only the selected triangle.
+def v15_blas_dsyrk(X, C, a, b, u):
+    C[:, :] = dsyrk(alpha=a, a=np.asfortranarray(X), beta=b,
+                    c=np.array(C, order='F', copy=True),
+                    trans=0, lower=0 if u else 1, overwrite_c=1)
 
 
 FUNCTIONS = [
@@ -585,8 +533,7 @@ FUNCTIONS = [
     ('08_flat_tri_tasks_OWN', v08_flat_tri_tasks), ('09_blocked_dot', v09_blocked_dot),
     ('10_diag_fastpath_OWN', v10_diagonal_fastpath),
     ('11_temp_copy', v11_temp_copy), ('12_fused_store_OWN', v12_fused_triangle_store),
-    ('13_two_level', v13_two_level), ('14_reusable_buffer', v14_reusable_buffer),
-    ('15_combined_OWN', v15_combined), ('16_blas_dsyrk', v16_blas_dsyrk),
+    ('13_two_level', v13_two_level), ('14_full_k_dot_OWN', v14_full_k_dot), ('15_blas_dsyrk', v15_blas_dsyrk),
 ]
 
 
@@ -610,7 +557,7 @@ def prepare(A, C, trans='N', uplo='U'):
     return X, uplo.upper() == 'U'
 
 
-def syrk(A, C, alpha=1.0, beta=0.0, trans='N', uplo='U', method='15_combined_OWN'):
+def syrk(A, C, alpha=1.0, beta=0.0, trans='N', uplo='U', method='14_full_k_dot_OWN'):
     """BLAS-style real SYRK, updates C in place; returns C."""
     X, u = prepare(A, C, trans, uplo)
     try:
@@ -623,7 +570,7 @@ def syrk(A, C, alpha=1.0, beta=0.0, trans='N', uplo='U', method='15_combined_OWN
 
 def reference(X, C0, alpha, beta, u):
     out = C0.copy()
-    v16_blas_dsyrk(X, out, alpha, beta, u)
+    v15_blas_dsyrk(X, out, alpha, beta, u)
     return out
 
 
@@ -789,5 +736,3 @@ if __name__ == "__main__":
     plt.tight_layout()
     if not args.no_plot:
         plt.show()
-
-
