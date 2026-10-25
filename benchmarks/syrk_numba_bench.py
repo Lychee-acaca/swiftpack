@@ -248,6 +248,29 @@ def v07_blocked_scalar(X, C, a, b, u):
                     C[i, j] = a * s + b * C[i, j]
 
 
+# ---------------------------------------------------------
+# Baseline 8: Remove scalar K blocking (V07 + one change)
+# ---------------------------------------------------------
+@njit(parallel=True, fastmath=True)
+def v08_full_k_scalar(X, C, a, b, u):
+    n, k = X.shape
+    nb = (n + BS - 1) // BS
+    for bi in prange(nb):
+        is_ = bi * BS
+        ie = min(n, is_ + BS)
+        for bj in range(nb):
+            if (u and bj < bi) or ((not u) and bj > bi):
+                continue
+            js = bj * BS
+            je = min(n, js + BS)
+            for i in range(is_, ie):
+                for j in range(max(i, js) if u else js, je if u else min(i + 1, je)):
+                    s = 0.0
+                    for l in range(k):
+                        s += X[i, l] * X[j, l]
+                    C[i, j] = a * s + b * C[i, j]
+
+
 # Map a flat task ID to its corresponding triangular block coordinates.
 # Example (nb=4): result C decomposed to 4*4 blocks, for upper case
 # 0 1 2 3
@@ -264,11 +287,10 @@ def triangular_task_coords(task, nb):
 
 
 # ---------------------------------------------------------
-# Baseline 8: balanced load
-# each block is an independent task
+# Baseline 9: Balanced flat triangular tasks (V08 + one change)
 # ---------------------------------------------------------
 @njit(parallel=True, fastmath=True)
-def v08_flat_tri_tasks(X, C, a, b, u):
+def v09_flat_tri_tasks(X, C, a, b, u):
     n, k = X.shape
     nb = (n + BS - 1) // BS
     nt = nb * (nb + 1) // 2  # total number of blocks from C
@@ -289,11 +311,10 @@ def v08_flat_tri_tasks(X, C, a, b, u):
 
 
 # ---------------------------------------------------------
-# Baseline 9: use np.dot within the V08 flat triangular tasks
-# Diagonal tiles still compute a full dot, then write only the selected triangle.
+# Baseline 10: Full-K block np.dot (V09 + one change)
 # ---------------------------------------------------------
 @njit(parallel=True, fastmath=True)
-def v09_blocked_dot(X, C, a, b, u):
+def v10_blocked_dot(X, C, a, b, u):
     n, k = X.shape
     nb = (n + BS - 1) // BS
     nt = nb * (nb + 1) // 2
@@ -305,21 +326,17 @@ def v09_blocked_dot(X, C, a, b, u):
         ie = min(n, is_ + BS)
         js = bj * BS
         je = min(n, js + BS)
-        tmp = np.zeros((ie - is_, je - js), dtype=np.float64)
-        for lb in range(0, k, BS):
-            le = min(lb + BS, k)
-            tmp += np.dot(X[is_:ie, lb:le], X[js:je, lb:le].T)
+        tmp = np.dot(X[is_:ie, :], X[js:je, :].T)
         for i in range(is_, ie):
             for j in range(max(i, js) if u else js, je if u else min(i + 1, je)):
                 C[i, j] = a * tmp[i - is_, j - js] + b * C[i, j]
 
 
 # ---------------------------------------------------------
-# Baseline 10: use np.dot within the V08 flat triangular tasks
-# Manually compute diagonal dot, use np.dot for off-diagonal.
+# Baseline 11: Diagonal scalar fast path (V10 + one change)
 # ---------------------------------------------------------
 @njit(parallel=True, fastmath=True)
-def v10_diagonal_fastpath(X, C, a, b, u):
+def v11_diagonal_fastpath(X, C, a, b, u):
     n, k = X.shape
     nb = (n + BS - 1) // BS
     nt = nb * (nb + 1) // 2
@@ -339,20 +356,17 @@ def v10_diagonal_fastpath(X, C, a, b, u):
                         s += X[i, l] * X[j, l]
                     C[i, j] = a * s + b * C[i, j]
         else:
-            tmp = np.zeros((ie - is_, je - js), dtype=np.float64)
-            for lb in range(0, k, BS):
-                le = min(lb + BS, k)
-                tmp += np.dot(X[is_:ie, lb:le], X[js:je, lb:le].T)
+            tmp = np.dot(X[is_:ie, :], X[js:je, :].T)
             for i in range(is_, ie):
                 for j in range(js, je):
                     C[i, j] = a * tmp[i - is_, j - js] + b * C[i, j]
 
 
 # ---------------------------------------------------------
-# Baseline 11: V10 diagonal fast path + blocked temporary copy-in/out
+# Baseline 12: Temporary C copy-in/out (V11 + one change)
 # ---------------------------------------------------------
 @njit(parallel=True, fastmath=True)
-def v11_temp_copy(X, C, a, b, u):
+def v12_temp_copy(X, C, a, b, u):
     n, k = X.shape
     nb = (n + BS - 1) // BS
     nt = nb * (nb + 1) // 2
@@ -377,23 +391,20 @@ def v11_temp_copy(X, C, a, b, u):
                 for j in range(i, je) if u else range(js, i + 1):
                     C[i, j] = temp[i - is_, j - js]
         else:
-            # Off-diagonal: copy C in, accumulate the blocked dot, then copy out.
+            # Off-diagonal: copy C in, compute full-K dot, then copy out.
             temp = C[is_:ie, js:je].copy()
             temp *= b
-            for lb in range(0, k, BS):
-                le = min(lb + BS, k)
-                temp += a * np.dot(X[is_:ie, lb:le], X[js:je, lb:le].T)
+            temp += a * np.dot(X[is_:ie, :], X[js:je, :].T)
             for i in range(is_, ie):
                 for j in range(js, je):
                     C[i, j] = temp[i - is_, j - js]
 
 
 # ---------------------------------------------------------
-# Baseline 12: V11 + direct triangle output update for off-diagonal
-# diagonal strategy unchanged
+# Baseline 13: Off-diagonal direct C store (V12 + one change)
 # ---------------------------------------------------------
 @njit(parallel=True, fastmath=True)
-def v12_fused_triangle_store(X, C, a, b, u):
+def v13_fused_triangle_store(X, C, a, b, u):
     n, k = X.shape
     nb = (n + BS - 1) // BS
     nt = nb * (nb + 1) // 2
@@ -417,20 +428,17 @@ def v12_fused_triangle_store(X, C, a, b, u):
                 for j in range(i, je) if u else range(js, i + 1):
                     C[i, j] = temp[i - is_, j - js]
         else:
-            temp = np.zeros((ie - is_, je - js), dtype=np.float64)
-            for lb in range(0, k, BS):
-                le = min(lb + BS, k)
-                temp += np.dot(X[is_:ie, lb:le], X[js:je, lb:le].T)
+            temp = np.dot(X[is_:ie, :], X[js:je, :].T)
             for i in range(is_, ie):
                 for j in range(js, je):
                     C[i, j] = a * temp[i - is_, j - js] + b * C[i, j]
 
 
 # ---------------------------------------------------------
-# Baseline 13: Two-Level Blocked Parallel based on v12
+# Baseline 14: Two-level output tiling (V13 + one change, keep Full-K)
 # ---------------------------------------------------------
 @njit(parallel=True, fastmath=True)
-def v13_two_level(X, C, a, b, u):
+def v14_two_level(X, C, a, b, u):
     n, k = X.shape
     nb = (n + L2 - 1) // L2
     nt = nb * (nb + 1) // 2
@@ -443,7 +451,7 @@ def v13_two_level(X, C, a, b, u):
         js2 = bj * L2
         je2 = min(n, js2 + L2)
         if bi == bj:
-            # Preserve V12 diagonal copy-in/out; only update the active triangle.
+            # Preserve V13 diagonal copy-in/out; only update the active triangle.
             temp = C[is2:ie2, js2:je2].copy()
             for i in range(is2, ie2):
                 for j in range(i, je2) if u else range(js2, i + 1):
@@ -456,62 +464,20 @@ def v13_two_level(X, C, a, b, u):
                     C[i, j] = temp[i - is2, j - js2]
         else:
             # Two-level tiling for the full off-diagonal output block.
-            # Accumulate products only, then perform V12's direct C update.
+            # Accumulate products only, then perform V13's direct C update.
             t2 = np.zeros((ie2 - is2, je2 - js2), dtype=np.float64)
-            for lb2 in range(0, k, L2):
-                le2 = min(k, lb2 + L2)
-                for is1 in range(is2, ie2, L1):
-                    ie1 = min(ie2, is1 + L1)
-                    for js1 in range(js2, je2, L1):
-                        je1 = min(je2, js1 + L1)
-                        ri = is1 - is2
-                        rj = js1 - js2
-                        t1 = t2[ri:ri + ie1 - is1, rj:rj + je1 - js1].copy()
-                        for lb1 in range(lb2, le2, L1):
-                            le1 = min(le2, lb1 + L1)
-                            t1 += np.dot(X[is1:ie1, lb1:le1], X[js1:je1, lb1:le1].T)
-                        t2[ri:ri + ie1 - is1, rj:rj + je1 - js1] = t1
+            for is1 in range(is2, ie2, L1):
+                ie1 = min(ie2, is1 + L1)
+                for js1 in range(js2, je2, L1):
+                    je1 = min(je2, js1 + L1)
+                    ri = is1 - is2
+                    rj = js1 - js2
+                    t1 = t2[ri:ri + ie1 - is1, rj:rj + je1 - js1].copy()
+                    t1 += np.dot(X[is1:ie1, :], X[js1:je1, :].T)
+                    t2[ri:ri + ie1 - is1, rj:rj + je1 - js1] = t1
             for i in range(is2, ie2):
                 for j in range(js2, je2):
                     C[i, j] = a * t2[i - is2, j - js2] + b * C[i, j]
-
-
-# ---------------------------------------------------------
-# Baseline 14: Full-K GEMM per off-diagonal tile (based on V12)
-# Keep V12 diagonal temp copy-in/out and flat triangular tasks.
-# Remove redundant K blocking: one np.dot per off-diagonal tile.
-# ---------------------------------------------------------
-@njit(parallel=True, fastmath=True)
-def v14_full_k_dot(X, C, a, b, u):
-    n, k = X.shape
-    nb = (n + BS - 1) // BS
-    nt = nb * (nb + 1) // 2
-    for task in prange(nt):
-        br, bc = triangular_task_coords(task, nb)
-        bi = int(br if u else bc)
-        bj = int(bc if u else br)
-        is_ = bi * BS
-        ie = min(n, is_ + BS)
-        js = bj * BS
-        je = min(n, js + BS)
-        if bi == bj:
-            # Unchanged V12 diagonal path: only the active triangle.
-            temp = C[is_:ie, js:je].copy()
-            for i in range(is_, ie):
-                for j in range(i, je) if u else range(js, i + 1):
-                    s = 0.0
-                    for l in range(k):
-                        s += X[i, l] * X[j, l]
-                    temp[i - is_, j - js] = a * s + b * temp[i - is_, j - js]
-            for i in range(is_, ie):
-                for j in range(i, je) if u else range(js, i + 1):
-                    C[i, j] = temp[i - is_, j - js]
-        else:
-            # One full-K BLAS call instead of repeated smaller K-block calls.
-            temp = np.dot(X[is_:ie, :], X[js:je, :].T)
-            for i in range(is_, ie):
-                for j in range(js, je):
-                    C[i, j] = a * temp[i - is_, j - js] + b * C[i, j]
 
 
 # 15 Reference BLAS: SciPy DSYRK updates only the selected triangle.
@@ -530,10 +496,11 @@ FUNCTIONS = [
     ('05_fastmath', v05_fastmath),
     ('06_parallel_i', v06_parallel_i), ('06_parallel_j', v06_parallel_j),
     ('06_parallel_l', v06_parallel_l), ('07_blocked_scalar', v07_blocked_scalar),
-    ('08_flat_tri_tasks_OWN', v08_flat_tri_tasks), ('09_blocked_dot', v09_blocked_dot),
-    ('10_diag_fastpath_OWN', v10_diagonal_fastpath),
-    ('11_temp_copy', v11_temp_copy), ('12_fused_store_OWN', v12_fused_triangle_store),
-    ('13_two_level', v13_two_level), ('14_full_k_dot_OWN', v14_full_k_dot), ('15_blas_dsyrk', v15_blas_dsyrk),
+    ('08_full_k_scalar_OWN', v08_full_k_scalar), ('09_flat_tri_tasks_OWN', v09_flat_tri_tasks),
+    ('10_blocked_dot', v10_blocked_dot),
+    ('11_diag_fastpath_OWN', v11_diagonal_fastpath),
+    ('12_temp_copy', v12_temp_copy), ('13_fused_store_OWN', v13_fused_triangle_store),
+    ('14_two_level_OWN', v14_two_level), ('15_blas_dsyrk', v15_blas_dsyrk),
 ]
 
 
@@ -557,7 +524,7 @@ def prepare(A, C, trans='N', uplo='U'):
     return X, uplo.upper() == 'U'
 
 
-def syrk(A, C, alpha=1.0, beta=0.0, trans='N', uplo='U', method='14_full_k_dot_OWN'):
+def syrk(A, C, alpha=1.0, beta=0.0, trans='N', uplo='U', method='14_two_level_OWN'):
     """BLAS-style real SYRK, updates C in place; returns C."""
     X, u = prepare(A, C, trans, uplo)
     try:
