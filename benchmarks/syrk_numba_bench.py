@@ -401,44 +401,13 @@ def v12_temp_copy(X, C, a, b, u):
 
 
 # ---------------------------------------------------------
-# Baseline 13: Off-diagonal direct C store (V12 + one change)
+# Baseline 13: Two-level output tiling (V11 + one change)
+# Branch directly from V11: no temporary C copy-in/out.
+# Keep V11's diagonal scalar path and full-K dot.
+# Only subdivide off-diagonal output tiles into L1 subtiles.
 # ---------------------------------------------------------
 @njit(parallel=True, fastmath=True)
-def v13_fused_triangle_store(X, C, a, b, u):
-    n, k = X.shape
-    nb = (n + BS - 1) // BS
-    nt = nb * (nb + 1) // 2
-    for task in prange(nt):
-        br, bc = triangular_task_coords(task, nb)
-        bi = int(br if u else bc)
-        bj = int(bc if u else br)
-        is_ = bi * BS
-        ie = min(n, is_ + BS)
-        js = bj * BS
-        je = min(n, js + BS)
-        if bi == bj:
-            temp = C[is_:ie, js:je].copy()
-            for i in range(is_, ie):
-                for j in range(i, je) if u else range(js, i + 1):
-                    s = 0.0
-                    for l in range(k):
-                        s += X[i, l] * X[j, l]
-                    temp[i - is_, j - js] = a * s + b * temp[i - is_, j - js]
-            for i in range(is_, ie):
-                for j in range(i, je) if u else range(js, i + 1):
-                    C[i, j] = temp[i - is_, j - js]
-        else:
-            temp = np.dot(X[is_:ie, :], X[js:je, :].T)
-            for i in range(is_, ie):
-                for j in range(js, je):
-                    C[i, j] = a * temp[i - is_, j - js] + b * C[i, j]
-
-
-# ---------------------------------------------------------
-# Baseline 14: Two-level output tiling (V13 + one change, keep Full-K)
-# ---------------------------------------------------------
-@njit(parallel=True, fastmath=True)
-def v14_two_level(X, C, a, b, u):
+def v13_two_level(X, C, a, b, u):
     n, k = X.shape
     nb = (n + L2 - 1) // L2
     nt = nb * (nb + 1) // 2
@@ -451,37 +420,27 @@ def v14_two_level(X, C, a, b, u):
         js2 = bj * L2
         je2 = min(n, js2 + L2)
         if bi == bj:
-            # Preserve V13 diagonal copy-in/out; only update the active triangle.
-            temp = C[is2:ie2, js2:je2].copy()
+            # V11 diagonal scalar fast path: update C directly.
             for i in range(is2, ie2):
                 for j in range(i, je2) if u else range(js2, i + 1):
                     s = 0.0
                     for l in range(k):
                         s += X[i, l] * X[j, l]
-                    temp[i - is2, j - js2] = a * s + b * temp[i - is2, j - js2]
-            for i in range(is2, ie2):
-                for j in range(i, je2) if u else range(js2, i + 1):
-                    C[i, j] = temp[i - is2, j - js2]
+                    C[i, j] = a * s + b * C[i, j]
         else:
-            # Two-level tiling for the full off-diagonal output block.
-            # Accumulate products only, then perform V13's direct C update.
-            t2 = np.zeros((ie2 - is2, je2 - js2), dtype=np.float64)
+            # V11 full-K dot and direct C update, with L1 output subtiles.
             for is1 in range(is2, ie2, L1):
                 ie1 = min(ie2, is1 + L1)
                 for js1 in range(js2, je2, L1):
                     je1 = min(je2, js1 + L1)
-                    ri = is1 - is2
-                    rj = js1 - js2
-                    t1 = t2[ri:ri + ie1 - is1, rj:rj + je1 - js1].copy()
-                    t1 += np.dot(X[is1:ie1, :], X[js1:je1, :].T)
-                    t2[ri:ri + ie1 - is1, rj:rj + je1 - js1] = t1
-            for i in range(is2, ie2):
-                for j in range(js2, je2):
-                    C[i, j] = a * t2[i - is2, j - js2] + b * C[i, j]
+                    tmp = np.dot(X[is1:ie1, :], X[js1:je1, :].T)
+                    for i in range(is1, ie1):
+                        for j in range(js1, je1):
+                            C[i, j] = a * tmp[i - is1, j - js1] + b * C[i, j]
 
 
-# 15 Reference BLAS: SciPy DSYRK updates only the selected triangle.
-def v15_blas_dsyrk(X, C, a, b, u):
+# 14 Reference BLAS: SciPy DSYRK updates only the selected triangle.
+def v14_blas_dsyrk(X, C, a, b, u):
     C[:, :] = dsyrk(alpha=a, a=np.asfortranarray(X), beta=b,
                     c=np.array(C, order='F', copy=True),
                     trans=0, lower=0 if u else 1, overwrite_c=1)
@@ -499,8 +458,8 @@ FUNCTIONS = [
     ('08_full_k_scalar_OWN', v08_full_k_scalar), ('09_flat_tri_tasks_OWN', v09_flat_tri_tasks),
     ('10_blocked_dot', v10_blocked_dot),
     ('11_diag_fastpath_OWN', v11_diagonal_fastpath),
-    ('12_temp_copy', v12_temp_copy), ('13_fused_store_OWN', v13_fused_triangle_store),
-    ('14_two_level_OWN', v14_two_level), ('15_blas_dsyrk', v15_blas_dsyrk),
+    ('12_temp_copy', v12_temp_copy), ('13_two_level_OWN', v13_two_level),
+    ('14_blas_dsyrk', v14_blas_dsyrk),
 ]
 
 
@@ -524,7 +483,7 @@ def prepare(A, C, trans='N', uplo='U'):
     return X, uplo.upper() == 'U'
 
 
-def syrk(A, C, alpha=1.0, beta=0.0, trans='N', uplo='U', method='14_two_level_OWN'):
+def syrk(A, C, alpha=1.0, beta=0.0, trans='N', uplo='U', method='13_two_level_OWN'):
     """BLAS-style real SYRK, updates C in place; returns C."""
     X, u = prepare(A, C, trans, uplo)
     try:
@@ -537,7 +496,7 @@ def syrk(A, C, alpha=1.0, beta=0.0, trans='N', uplo='U', method='14_two_level_OW
 
 def reference(X, C0, alpha, beta, u):
     out = C0.copy()
-    v15_blas_dsyrk(X, out, alpha, beta, u)
+    v14_blas_dsyrk(X, out, alpha, beta, u)
     return out
 
 
@@ -703,3 +662,4 @@ if __name__ == "__main__":
     plt.tight_layout()
     if not args.no_plot:
         plt.show()
+
