@@ -495,8 +495,72 @@ def v14_task_lookup(X, C, a, b, u, task_row, task_col):
                             C[i, j] = a * tmp[i - is1, j - js1] + b * C[i, j]
 
 
-# 15 Reference BLAS: SciPy DSYRK updates only the selected triangle.
-def v15_blas_dsyrk(X, C, a, b, u):
+# ---------------------------------------------------------
+# Baseline 15: Hoist UPLO selection outside the parallel task loops.
+# Inherits V14 lookup table, full-K dot, two-level output tiling,
+# diagonal scalar fast path, and direct C updates unchanged.
+# ---------------------------------------------------------
+@njit(parallel=True, fastmath=True)
+def v15_hoisted_uplo(X, C, a, b, u, task_row, task_col):
+    n, k = X.shape
+    nb = (n + L2 - 1) // L2
+    nt = nb * (nb + 1) // 2
+    if u:
+        for task in prange(nt):
+            br = task_row[task]
+            bc = task_col[task]
+            bi = int(br)
+            bj = int(bc)
+            is2 = bi * L2
+            ie2 = min(n, is2 + L2)
+            js2 = bj * L2
+            je2 = min(n, js2 + L2)
+            if bi == bj:
+                for i in range(is2, ie2):
+                    for j in range(i, je2):
+                        s = 0.0
+                        for l in range(k):
+                            s += X[i, l] * X[j, l]
+                        C[i, j] = a * s + b * C[i, j]
+            else:
+                for is1 in range(is2, ie2, L1):
+                    ie1 = min(ie2, is1 + L1)
+                    for js1 in range(js2, je2, L1):
+                        je1 = min(je2, js1 + L1)
+                        tmp = np.dot(X[is1:ie1, :], X[js1:je1, :].T)
+                        for i in range(is1, ie1):
+                            for j in range(js1, je1):
+                                C[i, j] = a * tmp[i - is1, j - js1] + b * C[i, j]
+    else:
+        for task in prange(nt):
+            br = task_row[task]
+            bc = task_col[task]
+            bi = int(bc)
+            bj = int(br)
+            is2 = bi * L2
+            ie2 = min(n, is2 + L2)
+            js2 = bj * L2
+            je2 = min(n, js2 + L2)
+            if bi == bj:
+                for i in range(is2, ie2):
+                    for j in range(js2, i + 1):
+                        s = 0.0
+                        for l in range(k):
+                            s += X[i, l] * X[j, l]
+                        C[i, j] = a * s + b * C[i, j]
+            else:
+                for is1 in range(is2, ie2, L1):
+                    ie1 = min(ie2, is1 + L1)
+                    for js1 in range(js2, je2, L1):
+                        je1 = min(je2, js1 + L1)
+                        tmp = np.dot(X[is1:ie1, :], X[js1:je1, :].T)
+                        for i in range(is1, ie1):
+                            for j in range(js1, je1):
+                                C[i, j] = a * tmp[i - is1, j - js1] + b * C[i, j]
+
+
+# 16 Reference BLAS: SciPy DSYRK updates only the selected triangle.
+def v16_blas_dsyrk(X, C, a, b, u):
     C[:, :] = dsyrk(alpha=a, a=np.asfortranarray(X), beta=b,
                     c=np.array(C, order='F', copy=True),
                     trans=0, lower=0 if u else 1, overwrite_c=1)
@@ -515,7 +579,8 @@ FUNCTIONS = [
     ('10_blocked_dot', v10_blocked_dot),
     ('11_diag_fastpath_OWN', v11_diagonal_fastpath),
     ('12_temp_copy', v12_temp_copy), ('13_two_level_OWN', v13_two_level),
-    ('14_task_lookup_OWN', v14_task_lookup), ('15_blas_dsyrk', v15_blas_dsyrk),
+    ('14_task_lookup_OWN', v14_task_lookup), ('15_hoisted_uplo_OWN', v15_hoisted_uplo),
+    ('16_blas_dsyrk', v16_blas_dsyrk),
 ]
 
 
@@ -539,14 +604,14 @@ def prepare(A, C, trans='N', uplo='U'):
     return X, uplo.upper() == 'U'
 
 
-def syrk(A, C, alpha=1.0, beta=0.0, trans='N', uplo='U', method='14_task_lookup_OWN', task_lookup=None):
+def syrk(A, C, alpha=1.0, beta=0.0, trans='N', uplo='U', method='15_hoisted_uplo_OWN', task_lookup=None):
     """BLAS-style real SYRK, updates C in place; returns C."""
     X, u = prepare(A, C, trans, uplo)
     try:
         fn = dict(FUNCTIONS)[method]
     except KeyError:
         raise ValueError('unknown method: ' + str(method)) from None
-    if method == '14_task_lookup_OWN':
+    if method in ('14_task_lookup_OWN', '15_hoisted_uplo_OWN'):
         # The benchmark passes a prebuilt table; standalone calls can build one here.
         if task_lookup is None:
             task_lookup = prepare_triangular_task_lookup(X.shape[0])
@@ -558,7 +623,7 @@ def syrk(A, C, alpha=1.0, beta=0.0, trans='N', uplo='U', method='14_task_lookup_
 
 def reference(X, C0, alpha, beta, u):
     out = C0.copy()
-    v15_blas_dsyrk(X, out, alpha, beta, u)
+    v16_blas_dsyrk(X, out, alpha, beta, u)
     return out
 
 
@@ -581,7 +646,7 @@ def test_all(verbose=True):
                     if name == '00_python_naive' and n > 33: continue
                     if name == '06_parallel_l' and n > 1: continue  # excessive per-dot nested scheduling
                     got = C0.copy()
-                    syrk(A, got, 1.25, -0.4, trans, 'U' if u else 'L', name, task_lookup=task_lookup if name == '14_task_lookup_OWN' else None)
+                    syrk(A, got, 1.25, -0.4, trans, 'U' if u else 'L', name, task_lookup=task_lookup if name in ('14_task_lookup_OWN', '15_hoisted_uplo_OWN') else None)
                     if not np.array_equal(got[opposite], C0[opposite]):
                         raise AssertionError(f'{name} wrote the inactive triangle at {(n, k, u, trans)}')
                     if not np.allclose(got, expected, rtol=2e-9, atol=2e-9):
@@ -644,7 +709,7 @@ def run_benchmark(matrix_size=(512, 256), alpha=1.25, beta=-0.4,
     py_correct = np.allclose(C_py, C_py_expected, rtol=1e-5, atol=1e-5)
     results.append(('00_python_naive', py_gflops, py_elapsed, py_correct))
 
-    # Setup V14 once, entirely outside the timed repetitions.
+    # Setup V14/V15 once, entirely outside the timed repetitions.
     # The benchmark measures only lookup accesses and SYRK computation.
     task_lookup = prepare_triangular_task_lookup(N)
 
@@ -654,7 +719,7 @@ def run_benchmark(matrix_size=(512, 256), alpha=1.25, beta=-0.4,
     for name, method in functions:
         def invoke(A_, C_, alpha_, beta_, trans_, uplo_, method_=method):
             return syrk(A_, C_, alpha_, beta_, trans_, uplo_, method_,
-                        task_lookup=task_lookup if method_ == '14_task_lookup_OWN' else None)
+                        task_lookup=task_lookup if method_ in ('14_task_lookup_OWN', '15_hoisted_uplo_OWN') else None)
 
         gflops, elapsed, is_correct = measure(invoke)
         results.append((name, gflops, elapsed, is_correct))
@@ -730,4 +795,3 @@ if __name__ == "__main__":
     plt.tight_layout()
     if not args.no_plot:
         plt.show()
-
