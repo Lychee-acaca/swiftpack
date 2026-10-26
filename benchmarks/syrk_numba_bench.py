@@ -10,11 +10,10 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
 
-import argparse
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.linalg.blas import dsyrk
-from numba import njit, prange, set_num_threads, get_num_threads
+from numba import njit, prange
 
 BS = 64
 L2 = 64
@@ -733,7 +732,6 @@ def reference(X, C0, alpha, beta, u):
 
 
 def test_all(verbose=True):
-    set_num_threads(4)
     # Odd, non-tile-aligned and rectangular shapes; exact untouched triangle test.
     cases = [(1, 3), (5, 7), (17, 9), (33, 35), (65, 13)]
     for n, k in cases:
@@ -764,11 +762,10 @@ def test_all(verbose=True):
 # ---------------------------------------------------------
 # Execution & Benchmarking Routine
 # ---------------------------------------------------------
-def run_benchmark(matrix_size=(512, 256), alpha=1.25, beta=-0.4,
-                  trans='N', uplo='U', threads=4, reps=9):
+def run_benchmark(matrix_size, alpha, beta,
+                  trans, uplo):
     global N, K
     N, K = matrix_size
-    set_num_threads(threads)
 
     np.random.seed(42)
     X = np.random.randn(N, K).astype(np.float64)
@@ -780,7 +777,7 @@ def run_benchmark(matrix_size=(512, 256), alpha=1.25, beta=-0.4,
     C_expected = reference(X, C_initial, alpha, beta, uplo == 'U')
     total_flops = float(N * (N + 1) * K)
 
-    def measure(fn, warmup=True, reps=reps):
+    def measure(fn, warmup=True, reps=9):
         C[:, :] = C_initial
         if warmup:
             fn(A, C, alpha, beta, trans, uplo)
@@ -838,25 +835,37 @@ def run_benchmark(matrix_size=(512, 256), alpha=1.25, beta=-0.4,
 # ---------------------------------------------------------
 if __name__ == "__main__":
     # Get user input for matrix dimensions N and K
-    N_input = 512
-    K_input = 256
+    N_input = 700
+    K_input = 300
+    alpha_input = 1.25
+    beta_input = -0.4
+    trans_input = 'N'
+    uplo_input = 'U'
     if len(sys.argv) > 1:
-        try:
-            N_input = int(sys.argv[1])
-        except ValueError:
-            N_input = 512
+        N_input = int(sys.argv[1])
     if len(sys.argv) > 2:
-        try:
-            K_input = int(sys.argv[2])
-        except ValueError:
-            K_input = 256
+        K_input = int(sys.argv[2])
     if len(sys.argv) > 3:
-        img_path = sys.argv[3]
-    else:
-        img_path = f"syrk_benchmark_N{N_input}_K{K_input}.png"
+        alpha_input = float(sys.argv[3])
+    if len(sys.argv) > 4:
+        beta_input = float(sys.argv[4])
+    if len(sys.argv) > 5:
+        trans_input = sys.argv[5].upper()
+    if len(sys.argv) > 6:
+        uplo_input = sys.argv[6].upper()
+    img_path = f"syrk_benchmark_N{N_input}_K{K_input}.png"
+    if len(sys.argv) > 7:
+        img_path = sys.argv[7]
+    if trans_input not in ('N', 'T', 'C'):
+        raise ValueError("trans must be 'N', 'T' or 'C'")
+    if uplo_input not in ('U', 'L'):
+        raise ValueError("uplo must be 'U' or 'L'")
 
-    print(f"\nRunning SYRK Benchmarks for Matrix Size {N_input}x{K_input}...\n")
-    benchmark_data = run_benchmark((N_input, K_input))
+    print(f"\nRunning SYRK Benchmarks for Matrix Size {N_input}x{K_input} "
+          f"(alpha={alpha_input}, beta={beta_input}, "
+          f"trans={trans_input}, uplo={uplo_input})...\n")
+    benchmark_data = run_benchmark((N_input, K_input), alpha_input, beta_input,
+                                   trans_input, uplo_input)
 
     py_elapsed = benchmark_data[0][2]  # Reference execution time for pure Python naive
 
