@@ -762,7 +762,7 @@ def test_all(verbose=True):
 
 
 # ---------------------------------------------------------
-# Execution & Benchmarking Routine (professor's original structure)
+# Execution & Benchmarking Routine
 # ---------------------------------------------------------
 def run_benchmark(matrix_size=(512, 256), alpha=1.25, beta=-0.4,
                   trans='N', uplo='U', threads=4, reps=9):
@@ -776,11 +776,11 @@ def run_benchmark(matrix_size=(512, 256), alpha=1.25, beta=-0.4,
     C = np.random.randn(N, N).astype(np.float64)
     C_initial = C.copy()
 
-    # Reference respects the input triangle, alpha/beta and transpose.
+    # Compute ground truth reference solution for correctness verification
     C_expected = reference(X, C_initial, alpha, beta, uplo == 'U')
     total_flops = float(N * (N + 1) * K)
 
-    def measure(fn, warmup=True, repetitions=reps):
+    def measure(fn, warmup=True, reps=reps):
         C[:, :] = C_initial
         if warmup:
             fn(A, C, alpha, beta, trans, uplo)
@@ -791,16 +791,17 @@ def run_benchmark(matrix_size=(512, 256), alpha=1.25, beta=-0.4,
         is_correct = np.allclose(C, C_expected, rtol=1e-5, atol=1e-5)
 
         start = time.perf_counter()
-        for _ in range(repetitions):
+        for _ in range(reps):
             C[:, :] = C_initial
             fn(A, C, alpha, beta, trans, uplo)
-        elapsed = (time.perf_counter() - start) / repetitions
+        elapsed = (time.perf_counter() - start) / reps
         gflops = (total_flops / elapsed) / 1e9
+
         return gflops, elapsed, is_correct
 
     results = []
 
-    # 0. Pure Python, truncated like professor's example to avoid lockups.
+    # 0. Pure Python (Run on a smaller dimension if N is large to prevent lockups)
     N_py, K_py = min(N, 128), min(K, 128)
     X_py = X[:N_py, :K_py].copy()
     A_py = X_py if trans == 'N' else X_py.T.copy()
@@ -812,15 +813,15 @@ def run_benchmark(matrix_size=(512, 256), alpha=1.25, beta=-0.4,
     py_elapsed = time.perf_counter() - t0
     py_gflops = (N_py * (N_py + 1) * K_py / py_elapsed) / 1e9
     py_correct = np.allclose(C_py, C_py_expected, rtol=1e-5, atol=1e-5)
+
     results.append((v00_python.__name__, py_gflops, py_elapsed, py_correct))
 
-    # Setup V14/V15/V16 once, entirely outside the timed repetitions.
-    # The benchmark measures only lookup accesses and SYRK computation.
+    # V14/V15/V16 lookup table prepared outside the timed region.
     task_lookup = prepare_triangular_task_lookup(N)
 
-    # Baseline functions list: professor techniques plus SYRK-specific methods,
-    # deliberately interleaved to make each development step visible.
+    # Baseline functions list
     functions = [(name, name) for name, _ in FUNCTIONS if name != v00_python.__name__]
+
     for name, method in functions:
         def invoke(A_, C_, alpha_, beta_, trans_, uplo_, method_=method):
             return syrk(A_, C_, alpha_, beta_, trans_, uplo_, method_,
@@ -833,55 +834,60 @@ def run_benchmark(matrix_size=(512, 256), alpha=1.25, beta=-0.4,
 
 
 # ---------------------------------------------------------
-# Formatting and Output Execution (professor's original structure)
+# Formatting and Output Execution
 # ---------------------------------------------------------
 if __name__ == "__main__":
-    # Original positional dimension input, extended to accept SYRK N and K.
-    # Additional optional flags do not change the professor's chart/layout.
-    parser = argparse.ArgumentParser()
-    parser.add_argument('N', nargs='?', type=int, default=700)
-    parser.add_argument('K', nargs='?', type=int, default=400)
-    parser.add_argument('--alpha', type=float, default=1.25)
-    parser.add_argument('--beta', type=float, default=-0.4)
-    parser.add_argument('--trans', choices=['N', 'T'], default='N')
-    parser.add_argument('--uplo', choices=['U', 'L'], default='U')
-    parser.add_argument('--threads', type=int, default=4)
-    parser.add_argument('--reps', type=int, default=9)
-    parser.add_argument('--test', action='store_true')
-    parser.add_argument('--no-plot', action='store_true')
-    args = parser.parse_args()
-    if args.test:
-        test_all()
-        sys.exit(0)
-    NK_input = (args.N, args.K)
-    print(f"\nRunning SYRK Benchmarks for Matrix Size {NK_input} "
-          f"(UPLO={args.uplo}, TRANS={args.trans}, alpha={args.alpha}, beta={args.beta})...\n")
-    benchmark_data = run_benchmark(NK_input, args.alpha, args.beta, args.trans,
-                                   args.uplo, args.threads, args.reps)
-    py_elapsed = benchmark_data[0][2]
+    # Get user input for matrix dimensions N and K
+    N_input = 512
+    K_input = 256
+    if len(sys.argv) > 1:
+        try:
+            N_input = int(sys.argv[1])
+        except ValueError:
+            N_input = 512
+    if len(sys.argv) > 2:
+        try:
+            K_input = int(sys.argv[2])
+        except ValueError:
+            K_input = 256
+    if len(sys.argv) > 3:
+        img_path = sys.argv[3]
+    else:
+        img_path = f"syrk_benchmark_N{N_input}_K{K_input}.png"
 
-    # Table Header Formatting - professor original
+    print(f"\nRunning SYRK Benchmarks for Matrix Size {N_input}x{K_input}...\n")
+    benchmark_data = run_benchmark((N_input, K_input))
+
+    py_elapsed = benchmark_data[0][2]  # Reference execution time for pure Python naive
+
+    # Table Header Formatting
     header = f"| {'Baseline Implementation':<33} | {'GFLOP/s':<10} | {'Abs Speedup':<12} | {'Rel Speedup':<12} | {'Correct':<8} |"
-    divider = "-" * len(header)
-    print(divider)
+    #divider = "-" * len(header)
+    divider = "| :---" * (len(header.split("|"))-2) + " |"
+
+    #print(divider)
     print(header)
     print(divider)
+
     prev_elapsed = None
+
     for name, gflops, elapsed, is_correct in benchmark_data:
         abs_speedup = py_elapsed / elapsed
         rel_speedup = (prev_elapsed / elapsed) if prev_elapsed is not None else 1.0
         status = "PASS" if is_correct else "FAIL"
+
         print(f"| {name:<33} | {gflops:10.3f} | {abs_speedup:12.2f}x | {rel_speedup:12.2f}x | {status:<8} |")
         prev_elapsed = elapsed
-    print(divider)
-    print('Note: Pure Python uses capped dimensions (N,K <= 128); Abs Speedup')
-    print('is not a same-size comparison if either input dimension exceeds 128.')
 
-    # Plotting Output - professor original, intentionally retained.
+    #print(divider)
+
+    # Plotting Output
     names = [row[0] for row in benchmark_data]
     gflops_vals = [row[1] for row in benchmark_data]
+
     plt.figure(figsize=(16, 6))
     bars = plt.bar(names, gflops_vals, color="skyblue", edgecolor="navy")
+
     for bar in bars:
         yval = bar.get_height()
         plt.text(
@@ -892,11 +898,12 @@ if __name__ == "__main__":
             va="bottom",
             fontsize=8,
         )
+
     plt.ylabel("GFLOP/s (Higher is better)")
-    plt.title(f"Numba SYRK Benchmark Performance (N={args.N}, K={args.K})")
+    plt.title(f"Numba SYRK Benchmark Performance (N={N_input}, K={K_input})")
     plt.xticks(rotation=45, ha="right")
     plt.yscale("log")
     plt.grid(True, which="both", ls="--", alpha=0.5)
     plt.tight_layout()
-    if not args.no_plot:
-        plt.show()
+    # save the plot as a PNG file
+    plt.savefig(img_path, dpi=300)
