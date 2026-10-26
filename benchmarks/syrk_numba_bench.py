@@ -1,3 +1,4 @@
+
 # reference material: https://netlib.org/lapack/explore-html/d4/d6e/group__herk_ga09ec411a6b845c47efb0bc8bd3283b03.html?utm_source=chatgpt.com
 
 import os
@@ -559,8 +560,105 @@ def v15_hoisted_uplo(X, C, a, b, u, task_row, task_col):
                                 C[i, j] = a * tmp[i - is1, j - js1] + b * C[i, j]
 
 
-# 16 Reference BLAS: SciPy DSYRK updates only the selected triangle.
-def v16_blas_dsyrk(X, C, a, b, u):
+# ---------------------------------------------------------
+# Baseline 16: 4-output diagonal fusion (V15 + one change).
+# Only fuse four adjacent scalar diagonal-tile dot products to reuse X[i,l].
+# Keep triangle-only work, full K, task lookup, UPLO hoisting and
+# off-diagonal full-K BLAS dot/output tiling byte-for-byte identical to V15.
+# ---------------------------------------------------------
+@njit(parallel=True, fastmath=True)
+def v16_diagonal_multioutput(X, C, a, b, u, task_row, task_col):
+    n, k = X.shape
+    nb = (n + L2 - 1) // L2
+    nt = nb * (nb + 1) // 2
+    if u:
+        for task in prange(nt):
+            br = task_row[task]
+            bc = task_col[task]
+            bi = int(br)
+            bj = int(bc)
+            is2 = bi * L2
+            ie2 = min(n, is2 + L2)
+            js2 = bj * L2
+            je2 = min(n, js2 + L2)
+            if bi == bj:
+                for i in range(is2, ie2):
+                    # Four adjacent upper-triangle outputs share X[i, l].
+                    j = i
+                    while j + 3 < je2:
+                        s0 = s1 = s2 = s3 = 0.0
+                        for l in range(k):
+                            xi = X[i, l]
+                            s0 += xi * X[j, l]
+                            s1 += xi * X[j + 1, l]
+                            s2 += xi * X[j + 2, l]
+                            s3 += xi * X[j + 3, l]
+                        C[i, j] = a * s0 + b * C[i, j]
+                        C[i, j + 1] = a * s1 + b * C[i, j + 1]
+                        C[i, j + 2] = a * s2 + b * C[i, j + 2]
+                        C[i, j + 3] = a * s3 + b * C[i, j + 3]
+                        j += 4
+                    # Tail: one to three outputs, same scalar math as V15.
+                    for jj in range(j, je2):
+                        s = 0.0
+                        for l in range(k):
+                            s += X[i, l] * X[jj, l]
+                        C[i, jj] = a * s + b * C[i, jj]
+            else:
+                for is1 in range(is2, ie2, L1):
+                    ie1 = min(ie2, is1 + L1)
+                    for js1 in range(js2, je2, L1):
+                        je1 = min(je2, js1 + L1)
+                        tmp = np.dot(X[is1:ie1, :], X[js1:je1, :].T)
+                        for i in range(is1, ie1):
+                            for j in range(js1, je1):
+                                C[i, j] = a * tmp[i - is1, j - js1] + b * C[i, j]
+    else:
+        for task in prange(nt):
+            br = task_row[task]
+            bc = task_col[task]
+            bi = int(bc)
+            bj = int(br)
+            is2 = bi * L2
+            ie2 = min(n, is2 + L2)
+            js2 = bj * L2
+            je2 = min(n, js2 + L2)
+            if bi == bj:
+                for i in range(is2, ie2):
+                    # Four adjacent lower-triangle outputs share X[i, l].
+                    j = js2
+                    while j + 3 <= i:
+                        s0 = s1 = s2 = s3 = 0.0
+                        for l in range(k):
+                            xi = X[i, l]
+                            s0 += xi * X[j, l]
+                            s1 += xi * X[j + 1, l]
+                            s2 += xi * X[j + 2, l]
+                            s3 += xi * X[j + 3, l]
+                        C[i, j] = a * s0 + b * C[i, j]
+                        C[i, j + 1] = a * s1 + b * C[i, j + 1]
+                        C[i, j + 2] = a * s2 + b * C[i, j + 2]
+                        C[i, j + 3] = a * s3 + b * C[i, j + 3]
+                        j += 4
+                    # Tail: one to three outputs, same scalar math as V15.
+                    for jj in range(j, i + 1):
+                        s = 0.0
+                        for l in range(k):
+                            s += X[i, l] * X[jj, l]
+                        C[i, jj] = a * s + b * C[i, jj]
+            else:
+                for is1 in range(is2, ie2, L1):
+                    ie1 = min(ie2, is1 + L1)
+                    for js1 in range(js2, je2, L1):
+                        je1 = min(je2, js1 + L1)
+                        tmp = np.dot(X[is1:ie1, :], X[js1:je1, :].T)
+                        for i in range(is1, ie1):
+                            for j in range(js1, je1):
+                                C[i, j] = a * tmp[i - is1, j - js1] + b * C[i, j]
+
+
+# 17 Reference BLAS: SciPy DSYRK updates only the selected triangle.
+def v17_blas_dsyrk(X, C, a, b, u):
     C[:, :] = dsyrk(alpha=a, a=np.asfortranarray(X), beta=b,
                     c=np.array(C, order='F', copy=True),
                     trans=0, lower=0 if u else 1, overwrite_c=1)
@@ -580,7 +678,8 @@ FUNCTIONS = [
     ('11_diag_fastpath_OWN', v11_diagonal_fastpath),
     ('12_temp_copy', v12_temp_copy), ('13_two_level_OWN', v13_two_level),
     ('14_task_lookup_OWN', v14_task_lookup), ('15_hoisted_uplo_OWN', v15_hoisted_uplo),
-    ('16_blas_dsyrk', v16_blas_dsyrk),
+    ('16_diag_multioutput_OWN', v16_diagonal_multioutput),
+    ('17_blas_dsyrk', v17_blas_dsyrk),
 ]
 
 
@@ -604,14 +703,14 @@ def prepare(A, C, trans='N', uplo='U'):
     return X, uplo.upper() == 'U'
 
 
-def syrk(A, C, alpha=1.0, beta=0.0, trans='N', uplo='U', method='15_hoisted_uplo_OWN', task_lookup=None):
+def syrk(A, C, alpha=1.0, beta=0.0, trans='N', uplo='U', method='16_diag_multioutput_OWN', task_lookup=None):
     """BLAS-style real SYRK, updates C in place; returns C."""
     X, u = prepare(A, C, trans, uplo)
     try:
         fn = dict(FUNCTIONS)[method]
     except KeyError:
         raise ValueError('unknown method: ' + str(method)) from None
-    if method in ('14_task_lookup_OWN', '15_hoisted_uplo_OWN'):
+    if method in ('14_task_lookup_OWN', '15_hoisted_uplo_OWN', '16_diag_multioutput_OWN'):
         # The benchmark passes a prebuilt table; standalone calls can build one here.
         if task_lookup is None:
             task_lookup = prepare_triangular_task_lookup(X.shape[0])
@@ -623,7 +722,7 @@ def syrk(A, C, alpha=1.0, beta=0.0, trans='N', uplo='U', method='15_hoisted_uplo
 
 def reference(X, C0, alpha, beta, u):
     out = C0.copy()
-    v16_blas_dsyrk(X, out, alpha, beta, u)
+    v17_blas_dsyrk(X, out, alpha, beta, u)
     return out
 
 
@@ -646,7 +745,7 @@ def test_all(verbose=True):
                     if name == '00_python_naive' and n > 33: continue
                     if name == '06_parallel_l' and n > 1: continue  # excessive per-dot nested scheduling
                     got = C0.copy()
-                    syrk(A, got, 1.25, -0.4, trans, 'U' if u else 'L', name, task_lookup=task_lookup if name in ('14_task_lookup_OWN', '15_hoisted_uplo_OWN') else None)
+                    syrk(A, got, 1.25, -0.4, trans, 'U' if u else 'L', name, task_lookup=task_lookup if name in ('14_task_lookup_OWN', '15_hoisted_uplo_OWN', '16_diag_multioutput_OWN') else None)
                     if not np.array_equal(got[opposite], C0[opposite]):
                         raise AssertionError(f'{name} wrote the inactive triangle at {(n, k, u, trans)}')
                     if not np.allclose(got, expected, rtol=2e-9, atol=2e-9):
@@ -709,7 +808,7 @@ def run_benchmark(matrix_size=(512, 256), alpha=1.25, beta=-0.4,
     py_correct = np.allclose(C_py, C_py_expected, rtol=1e-5, atol=1e-5)
     results.append(('00_python_naive', py_gflops, py_elapsed, py_correct))
 
-    # Setup V14/V15 once, entirely outside the timed repetitions.
+    # Setup V14/V15/V16 once, entirely outside the timed repetitions.
     # The benchmark measures only lookup accesses and SYRK computation.
     task_lookup = prepare_triangular_task_lookup(N)
 
@@ -719,7 +818,7 @@ def run_benchmark(matrix_size=(512, 256), alpha=1.25, beta=-0.4,
     for name, method in functions:
         def invoke(A_, C_, alpha_, beta_, trans_, uplo_, method_=method):
             return syrk(A_, C_, alpha_, beta_, trans_, uplo_, method_,
-                        task_lookup=task_lookup if method_ in ('14_task_lookup_OWN', '15_hoisted_uplo_OWN') else None)
+                        task_lookup=task_lookup if method_ in ('14_task_lookup_OWN', '15_hoisted_uplo_OWN', '16_diag_multioutput_OWN') else None)
 
         gflops, elapsed, is_correct = measure(invoke)
         results.append((name, gflops, elapsed, is_correct))
