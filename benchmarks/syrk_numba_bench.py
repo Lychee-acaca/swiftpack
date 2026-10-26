@@ -1,5 +1,5 @@
 
-# reference material: https://netlib.org/lapack/explore-html/d4/d6e/group__herk_ga09ec411a6b845c47efb0bc8bd3283b03.html?utm_source=chatgpt.com
+# reference material: https://netlib.org/lapack/explore-html/d4/d6e/group__herk_ga09ec411a6b845c47efb0bc8bd3283b03.html
 
 import os
 import sys
@@ -380,7 +380,7 @@ def v12_temp_copy(X, C, a, b, u):
         js = bj * BS
         je = min(n, js + BS)
         if bi == bj:
-            # Keep V10's diagonal fast path: calculate only the selected triangle.
+            # Keep V11's diagonal scalar fast path: calculate only the selected triangle.
             temp = C[is_:ie, js:je].copy()
             for i in range(is_, ie):
                 for j in range(i, je) if u else range(js, i + 1):
@@ -665,22 +665,28 @@ def v17_blas_dsyrk(X, C, a, b, u):
 
 
 FUNCTIONS = [
-    ('00_python_naive', v00_python), ('01_numba_naive', v01_numba),
-    ('02_ijl', v02_ijl), ('02_ilj', v02_ilj), ('02_jil', v02_jil),
-    ('02_jli', v02_jli), ('02_lij', v02_lij), ('02_lji', v02_lji),
-    ('03_unroll4_OWN', v03_unroll4),
-    ('04_unroll4_fastmath_OWN', v04_unroll4_fastmath),
-    ('05_fastmath', v05_fastmath),
-    ('06_parallel_i', v06_parallel_i), ('06_parallel_j', v06_parallel_j),
-    ('06_parallel_l', v06_parallel_l), ('07_blocked_scalar', v07_blocked_scalar),
-    ('08_full_k_scalar_OWN', v08_full_k_scalar), ('09_flat_tri_tasks_OWN', v09_flat_tri_tasks),
-    ('10_blocked_dot', v10_blocked_dot),
-    ('11_diag_fastpath_OWN', v11_diagonal_fastpath),
-    ('12_temp_copy', v12_temp_copy), ('13_two_level_OWN', v13_two_level),
-    ('14_task_lookup_OWN', v14_task_lookup), ('15_hoisted_uplo_OWN', v15_hoisted_uplo),
-    ('16_diag_multioutput_OWN', v16_diagonal_multioutput),
-    ('17_blas_dsyrk', v17_blas_dsyrk),
+    (fn.__name__, fn) for fn in [
+        v00_python, v01_numba,
+        v02_ijl, v02_ilj, v02_jil,
+        v02_jli, v02_lij, v02_lji,
+        v03_unroll4, v04_unroll4_fastmath,
+        v05_fastmath,
+        v06_parallel_i, v06_parallel_j, v06_parallel_l,
+        v07_blocked_scalar,
+        v08_full_k_scalar, v09_flat_tri_tasks,
+        v10_blocked_dot, v11_diagonal_fastpath,
+        v12_temp_copy, v13_two_level,
+        v14_task_lookup, v15_hoisted_uplo,
+        v16_diagonal_multioutput,
+        v17_blas_dsyrk,
+    ]
 ]
+
+# Kernels that receive the precomputed triangular task table.
+# Derive method names from the functions to avoid stale string references.
+LOOKUP_METHODS = frozenset(fn.__name__ for fn in (
+    v14_task_lookup, v15_hoisted_uplo, v16_diagonal_multioutput
+))
 
 
 def prepare(A, C, trans='N', uplo='U'):
@@ -703,14 +709,14 @@ def prepare(A, C, trans='N', uplo='U'):
     return X, uplo.upper() == 'U'
 
 
-def syrk(A, C, alpha=1.0, beta=0.0, trans='N', uplo='U', method='16_diag_multioutput_OWN', task_lookup=None):
+def syrk(A, C, alpha=1.0, beta=0.0, trans='N', uplo='U', method=v16_diagonal_multioutput.__name__, task_lookup=None):
     """BLAS-style real SYRK, updates C in place; returns C."""
     X, u = prepare(A, C, trans, uplo)
     try:
         fn = dict(FUNCTIONS)[method]
     except KeyError:
         raise ValueError('unknown method: ' + str(method)) from None
-    if method in ('14_task_lookup_OWN', '15_hoisted_uplo_OWN', '16_diag_multioutput_OWN'):
+    if method in LOOKUP_METHODS:
         # The benchmark passes a prebuilt table; standalone calls can build one here.
         if task_lookup is None:
             task_lookup = prepare_triangular_task_lookup(X.shape[0])
@@ -742,10 +748,10 @@ def test_all(verbose=True):
                 opposite = np.tril_indices(n, -1) if u else np.triu_indices(n, 1)
                 task_lookup = prepare_triangular_task_lookup(n)
                 for name, fn in FUNCTIONS:
-                    if name == '00_python_naive' and n > 33: continue
-                    if name == '06_parallel_l' and n > 1: continue  # excessive per-dot nested scheduling
+                    if name == v00_python.__name__ and n > 33: continue
+                    if name == v06_parallel_l.__name__ and n > 1: continue  # excessive per-dot nested scheduling
                     got = C0.copy()
-                    syrk(A, got, 1.25, -0.4, trans, 'U' if u else 'L', name, task_lookup=task_lookup if name in ('14_task_lookup_OWN', '15_hoisted_uplo_OWN', '16_diag_multioutput_OWN') else None)
+                    syrk(A, got, 1.25, -0.4, trans, 'U' if u else 'L', name, task_lookup=task_lookup if name in LOOKUP_METHODS else None)
                     if not np.array_equal(got[opposite], C0[opposite]):
                         raise AssertionError(f'{name} wrote the inactive triangle at {(n, k, u, trans)}')
                     if not np.allclose(got, expected, rtol=2e-9, atol=2e-9):
@@ -802,11 +808,11 @@ def run_benchmark(matrix_size=(512, 256), alpha=1.25, beta=-0.4,
     C_py_expected = reference(X_py, C_py, alpha, beta, uplo == 'U')
 
     t0 = time.perf_counter()
-    syrk(A_py, C_py, alpha, beta, trans, uplo, '00_python_naive')
+    syrk(A_py, C_py, alpha, beta, trans, uplo, v00_python.__name__)
     py_elapsed = time.perf_counter() - t0
     py_gflops = (N_py * (N_py + 1) * K_py / py_elapsed) / 1e9
     py_correct = np.allclose(C_py, C_py_expected, rtol=1e-5, atol=1e-5)
-    results.append(('00_python_naive', py_gflops, py_elapsed, py_correct))
+    results.append((v00_python.__name__, py_gflops, py_elapsed, py_correct))
 
     # Setup V14/V15/V16 once, entirely outside the timed repetitions.
     # The benchmark measures only lookup accesses and SYRK computation.
@@ -814,11 +820,11 @@ def run_benchmark(matrix_size=(512, 256), alpha=1.25, beta=-0.4,
 
     # Baseline functions list: professor techniques plus SYRK-specific methods,
     # deliberately interleaved to make each development step visible.
-    functions = [(name, name) for name, _ in FUNCTIONS if name != '00_python_naive']
+    functions = [(name, name) for name, _ in FUNCTIONS if name != v00_python.__name__]
     for name, method in functions:
         def invoke(A_, C_, alpha_, beta_, trans_, uplo_, method_=method):
             return syrk(A_, C_, alpha_, beta_, trans_, uplo_, method_,
-                        task_lookup=task_lookup if method_ in ('14_task_lookup_OWN', '15_hoisted_uplo_OWN', '16_diag_multioutput_OWN') else None)
+                        task_lookup=task_lookup if method_ in LOOKUP_METHODS else None)
 
         gflops, elapsed, is_correct = measure(invoke)
         results.append((name, gflops, elapsed, is_correct))
