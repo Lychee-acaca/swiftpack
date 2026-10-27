@@ -23,6 +23,7 @@ class LocalValueNumberingTransformer(ast.NodeTransformer):
     2. Constant Folding (Arithmetic, Unary, and Boolean)
     3. Algebraic Identity Simplification
     4. Common Subexpression Elimination (CSE) via Local Value Numbering
+    5. Dead Code Elimination (DAE) for unused variable assignments
     """
 
     def __init__(self):
@@ -35,13 +36,7 @@ class LocalValueNumberingTransformer(ast.NodeTransformer):
     # -------------------------------------------------------------------------
 
     def _create_scope_table(self):
-        """Creates a fresh LVN mapping table for a new basic block scope.
-
-        - copy_propagation_table: Maps variable identifiers to their known constant or
-          aliased source variable.
-        - expression_value_table: Maps structural expression signatures (hashes) to
-          the temporary variable holding their computed result.
-        """
+        """Creates a fresh LVN mapping table for a new basic block scope."""
         return {
             "copy_propagation_table": {},
             "expression_value_table": {},
@@ -102,13 +97,7 @@ class LocalValueNumberingTransformer(ast.NodeTransformer):
         return ast.dump(expr_node, include_attributes=False)
 
     def _eliminate_common_subexpression(self, expr_node, scope):
-        """Performs Common Subexpression Elimination using the expression value table.
-
-        If the expression was previously computed in the same basic block:
-            Replaces the expression with the existing temporary variable.
-        Else:
-            Creates a temporary variable, emits an assignment statement, and updates the table.
-        """
+        """Performs Common Subexpression Elimination using the expression value table."""
         if self._is_terminal_value(expr_node):
             return expr_node, []
 
@@ -129,7 +118,47 @@ class LocalValueNumberingTransformer(ast.NodeTransformer):
         return ast.copy_location(ast.Name(id=new_temp_name, ctx=ast.Load()), expr_node), [hoisted_assignment]
 
     # -------------------------------------------------------------------------
-    # 3. Constant Folding Evaluation Helpers
+    # 3. Dead Code Elimination (DAE) Helpers
+    # -------------------------------------------------------------------------
+
+    def _is_pure_expression(self, node):
+        """Checks if an expression has no side effects and is safe to eliminate if unused."""
+        if isinstance(node, (ast.Constant, ast.Name)):
+            return True
+        if isinstance(node, ast.BinOp):
+            return self._is_pure_expression(node.left) and self._is_pure_expression(node.right)
+        if isinstance(node, ast.UnaryOp):
+            return self._is_pure_expression(node.operand)
+        return False
+
+    def _eliminate_dead_assignments(self, stmts):
+        """Iteratively removes assignments to local variables that are never loaded (read)."""
+        changed = True
+        while changed:
+            changed = False
+            loaded_names = set()
+            for stmt in stmts:
+                for node in ast.walk(stmt):
+                    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                        loaded_names.add(node.id)
+
+            new_stmts = []
+            for stmt in stmts:
+                is_dead = False
+                if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+                    target = stmt.targets[0]
+                    if isinstance(target, ast.Name):
+                        var_name = target.id
+                        if var_name not in loaded_names and self._is_pure_expression(stmt.value):
+                            is_dead = True
+                            changed = True
+                if not is_dead:
+                    new_stmts.append(stmt)
+            stmts = new_stmts
+        return stmts
+
+    # -------------------------------------------------------------------------
+    # 4. Constant Folding Evaluation Helpers
     # -------------------------------------------------------------------------
 
     def _evaluate_binary_operation(self, operator, left_value, right_value):
@@ -160,35 +189,22 @@ class LocalValueNumberingTransformer(ast.NodeTransformer):
             return None
         return None
 
-    def _fold_boolean_operations(self, expr_node):
-        if isinstance(expr_node, ast.BoolOp):
-            evaluated_values = [self._optimize_expression(item, self._get_active_scope()) for item in expr_node.values]
-            if all(isinstance(v, ast.Constant) for v in evaluated_values):
-                if isinstance(expr_node.op, ast.And):
-                    return ast.Constant(value=all(bool(v.value) for v in evaluated_values))
-                if isinstance(expr_node.op, ast.Or):
-                    return ast.Constant(value=any(bool(v.value) for v in evaluated_values))
-        return expr_node
-
     # -------------------------------------------------------------------------
-    # 4. Expression Simplification & Algebraic Optimization Pipeline
+    # 5. Expression Simplification & Algebraic Optimization Pipeline
     # -------------------------------------------------------------------------
 
     def _simplify_and_fold_expression(self, node):
         """Applies compile-time constant folding and algebraic identity simplifications."""
-        # --- Binary Operations ---
         if isinstance(node, ast.BinOp):
             left = self._optimize_expression(node.left, self._get_active_scope())
             right = self._optimize_expression(node.right, self._get_active_scope())
             node.left, node.right = left, right
 
-            # Compile-time Constant Folding
             if isinstance(left, ast.Constant) and isinstance(right, ast.Constant):
                 folded_value = self._evaluate_binary_operation(node.op, left.value, right.value)
                 if folded_value is not None:
                     return ast.Constant(value=folded_value)
 
-            # Algebraic Identity Simplifications
             if isinstance(node.op, ast.Add):
                 if isinstance(right, ast.Constant) and right.value == 0: return left
                 if isinstance(left, ast.Constant) and left.value == 0: return right
@@ -211,7 +227,6 @@ class LocalValueNumberingTransformer(ast.NodeTransformer):
 
             return node
 
-        # --- Unary Operations ---
         if isinstance(node, ast.UnaryOp):
             operand = self._optimize_expression(node.operand, self._get_active_scope())
             node.operand = operand
@@ -226,7 +241,6 @@ class LocalValueNumberingTransformer(ast.NodeTransformer):
                     return ast.Constant(value=0)
             return node
 
-        # --- Comparison Operations ---
         if isinstance(node, ast.Compare):
             left = self._optimize_expression(node.left, self._get_active_scope())
             comparators = [self._optimize_expression(c, self._get_active_scope()) for c in node.comparators]
@@ -287,7 +301,8 @@ class LocalValueNumberingTransformer(ast.NodeTransformer):
                 processed_statements.extend(rewritten_stmt)
             else:
                 processed_statements.append(rewritten_stmt)
-        return processed_statements
+        # Apply Dead Code Elimination to the statement block
+        return self._eliminate_dead_assignments(processed_statements)
 
     # -------------------------------------------------------------------------
     # AST Visitor Control Flow Drivers
@@ -376,7 +391,6 @@ class LocalValueNumberingTransformer(ast.NodeTransformer):
             rewritten_target = self._optimize_expression(target, scope)
             rewritten_targets.append(rewritten_target)
             if isinstance(rewritten_target, ast.Name) and isinstance(node.value, (ast.Name, ast.Constant)):
-                # Record copy mapping: target_variable -> constant_or_alias
                 scope["copy_propagation_table"][rewritten_target.id] = node.value
 
         node.targets = rewritten_targets
