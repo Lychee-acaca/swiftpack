@@ -2,17 +2,30 @@ import ast
 from swiftpack.transformation import Transformation
 
 
-class LocalAnalysis(Transformation):
-    """Performs local value numbering and local optimization in each basic block."""
+LVN_DIRECTIVE = "lvn"
+
+
+class LocalValueNumbering(Transformation):
+    """Local value numbering (plus local optimizations) inside each basic block.
+
+    The pass only runs when the schedule carries the `lvn` directive, e.g.
+    `(LocalValueNumbering, {"directive": "lvn"})`.
+    """
 
     def check_legality(self, tree: ast.AST, **kwargs) -> bool:
-        return True
+        if kwargs.get("directive") != LVN_DIRECTIVE:
+            return False
+        return isinstance(tree, (ast.Module, ast.FunctionDef))
 
     def apply(self, tree: ast.AST, **kwargs) -> ast.AST:
         transformer = LocalValueNumberingTransformer()
         transformed = transformer.visit(tree)
         ast.fix_missing_locations(transformed)
         return transformed
+
+
+# Backward-compatible name
+LocalAnalysis = LocalValueNumbering
 
 
 class LocalValueNumberingTransformer(ast.NodeTransformer):

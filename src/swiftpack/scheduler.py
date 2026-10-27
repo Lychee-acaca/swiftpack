@@ -4,7 +4,7 @@ from swiftpack.transformation import Transformation
 from swiftpack.loop_exchange import LoopExchange
 from swiftpack.tiling import LoopTiling
 from swiftpack.parallelism import ParallelizeLoop
-from swiftpack.lvn import LocalAnalysis
+from swiftpack.lvn import LocalValueNumbering
 
 class Scheduler:
     """Analyzes the input AST and produces an ordered sequence of transformations."""
@@ -25,7 +25,7 @@ class AutoTileAndParallelizeScheduler(Scheduler):
     def schedule(self, tree: ast.AST) -> List[Tuple[Type[Transformation], Dict[str, Any]]]:
         return [
             # 1. Apply local value numbering and optimization within each basic block
-            (LocalAnalysis, {}),
+            (LocalValueNumbering, {"directive": "lvn"}),
             # 2. Reorder loops from IJK -> IKJ for cache locality
             (LoopExchange, {"target_loops": ("j", "k")}),
             # 3. Block/Tile nested iteration space
